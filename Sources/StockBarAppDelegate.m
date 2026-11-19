@@ -1,6 +1,7 @@
 #import "StockBarAppDelegate.h"
 
 #import "AddStockMenuItemView.h"
+#import "DesktopMarketController.h"
 #import "GroupTabsMenuItemView.h"
 #import "LoginItemController.h"
 #import "PersistentTouchBarController.h"
@@ -20,6 +21,7 @@ static NSString * const RightSidePositionSeededKey = @"status.rightSideDefault.v
 @interface StockBarAppDelegate () <StockMenuItemViewDelegate, AddStockMenuItemViewDelegate, GroupTabsMenuItemViewDelegate, StockSearchWindowControllerDelegate>
 
 @property (nonatomic, strong) NSStatusItem *statusItem;
+@property (nonatomic, strong) DesktopMarketController *desktopMarket;
 @property (nonatomic, strong) NSMenu *statusMenu;
 @property (nonatomic, strong) NSMenuItem *quoteStatusMenuItem;
 @property (nonatomic, strong) NSMutableArray<NSMenuItem *> *stockMenuItems;
@@ -77,8 +79,10 @@ static NSString * const RightSidePositionSeededKey = @"status.rightSideDefault.v
         NSLog(@"登录项路径迁移失败：%@", loginItemRepairError);
     }
 
+    self.desktopMarket = [DesktopMarketController new];
     [self buildStatusItem];
     [self observeSystemLifecycle];
+    [self.desktopMarket restoreIfVisible];
 
     __weak StockBarAppDelegate *weakSelf = self;
     self.quoteService.updateHandler = ^(NSArray<StockQuote *> *quotes, NSString *statusText) {
@@ -172,8 +176,10 @@ static NSString * const RightSidePositionSeededKey = @"status.rightSideDefault.v
 
 - (BOOL)applicationShouldHandleReopen:(NSApplication *)sender hasVisibleWindows:(BOOL)flag {
     (void)sender;
-    (void)flag;
     self.statusItem.visible = YES;
+    if (!flag) {
+        [self.desktopMarket showPanel];
+    }
     return NO;
 }
 
@@ -309,6 +315,11 @@ static NSString * const RightSidePositionSeededKey = @"status.rightSideDefault.v
     refreshItem.target = self;
     [menu addItem:refreshItem];
 
+    NSMenuItem *desktopItem = [[NSMenuItem alloc] initWithTitle:@"显示或隐藏桌面行情"
+                                                       action:@selector(toggleDesktopMarket:) keyEquivalent:@""];
+    desktopItem.target = self;
+    [menu addItem:desktopItem];
+
     [menu addItem:NSMenuItem.separatorItem];
     NSMenuItem *newsItem = [[NSMenuItem alloc] initWithTitle:@"财经快讯（东方财富）"
                                                     action:@selector(openFinancialNews:)
@@ -352,6 +363,11 @@ static NSString * const RightSidePositionSeededKey = @"status.rightSideDefault.v
     [self performSelector:@selector(logStatusItemState) withObject:nil afterDelay:1.0];
 }
 
+- (void)toggleDesktopMarket:(id)sender {
+    (void)sender;
+    [self.desktopMarket toggle];
+}
+
 - (void)observeSystemLifecycle {
     NSNotificationCenter *workspaceCenter = NSWorkspace.sharedWorkspace.notificationCenter;
     [workspaceCenter addObserver:self selector:@selector(systemDidResume:) name:NSWorkspaceDidWakeNotification object:nil];
@@ -364,6 +380,7 @@ static NSString * const RightSidePositionSeededKey = @"status.rightSideDefault.v
         [self.touchBarController present];
     }
     [self.quoteService refresh];
+    [self.desktopMarket refresh];
 }
 
 - (void)watchdogTick:(NSTimer *)timer {
@@ -571,6 +588,7 @@ static NSString * const RightSidePositionSeededKey = @"status.rightSideDefault.v
     (void)sender;
     self.quoteStatusMenuItem.title = @"正在刷新行情…";
     [self.quoteService refresh];
+    [self.desktopMarket refresh];
 }
 
 - (void)openFinancialNews:(id)sender {

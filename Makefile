@@ -1,7 +1,7 @@
 PRODUCT_NAME := StockBar
 EXECUTABLE_NAME := StockBar
-VERSION := 0.7.2
-BUILD_NUMBER := 20
+VERSION := 0.8.2
+BUILD_NUMBER := 23
 BUILD_DIR := build
 DIST_DIR := dist
 APP_BUNDLE := $(BUILD_DIR)/StockBar.app
@@ -26,10 +26,11 @@ CC := clang
 COMMON_CFLAGS := -fobjc-arc -fmodules -fmodules-cache-path=$(BUILD_DIR)/ModuleCache -I Sources -Wall -Wextra -Wpedantic -Wno-deprecated-declarations
 X86_64_CFLAGS := $(COMMON_CFLAGS) -arch x86_64 -mmacosx-version-min=10.14
 ARM64_CFLAGS := $(COMMON_CFLAGS) -arch arm64 -mmacosx-version-min=11.0
-FRAMEWORKS := -framework AppKit -framework Foundation -framework CoreFoundation -framework IOKit
+FRAMEWORKS := -framework AppKit -framework Foundation -framework CoreFoundation -framework IOKit -framework QuartzCore
 HARDWARE_SMOKE := $(BUILD_DIR)/TouchBarHardwareSmoke
 QUOTE_SMOKE := $(BUILD_DIR)/QuoteServiceSmoke
 INDEX_SMOKE := $(BUILD_DIR)/IndexQuoteSmoke
+MINUTE_TEST := $(BUILD_DIR)/DesktopMarketMinuteTest
 FUND_TEST := $(BUILD_DIR)/FundSupportTest
 GROUP_TEST := $(BUILD_DIR)/WatchlistGroupsTest
 GROUP_TABS_TEST := $(BUILD_DIR)/GroupTabsTest
@@ -112,7 +113,12 @@ $(SEARCH_SMOKE): Tests/StockSearchSmoke.m Sources/StockSearchService.m Sources/W
 search-smoke: $(SEARCH_SMOKE)
 	"$(SEARCH_SMOKE)"
 
-test: $(FUND_TEST) $(GROUP_TEST) $(SEARCH_TEST)
+$(MINUTE_TEST): Tests/DesktopMarketMinuteTest.m Sources/DesktopMarketService.m Sources/DesktopMarketService.h
+	@mkdir -p "$(BUILD_DIR)"
+	$(CC) $(COMMON_CFLAGS) -mmacosx-version-min=10.14 Tests/DesktopMarketMinuteTest.m Sources/DesktopMarketService.m -framework Foundation -framework CoreFoundation -o "$@"
+
+test: $(MINUTE_TEST) $(FUND_TEST) $(GROUP_TEST) $(SEARCH_TEST)
+	"$(MINUTE_TEST)"
 	"$(FUND_TEST)"
 	"$(GROUP_TEST)"
 	"$(SEARCH_TEST)"
