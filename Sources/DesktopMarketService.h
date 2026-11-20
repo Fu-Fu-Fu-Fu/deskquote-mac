@@ -4,6 +4,9 @@ NS_ASSUME_NONNULL_BEGIN
 
 @interface DesktopCandle : NSObject
 @property (nonatomic, strong) NSDate *time;
+@property (nonatomic, copy, nullable) NSString *tradingDay;
+@property (nonatomic) double previousSessionClose;
+@property (nonatomic) double settlement;
 @property (nonatomic) double open;
 @property (nonatomic) double high;
 @property (nonatomic) double low;
@@ -17,6 +20,8 @@ NS_ASSUME_NONNULL_BEGIN
 @property (nonatomic, copy) NSString *source;
 @property (nonatomic, strong) NSDate *time;
 @property (nonatomic, strong, nullable) NSDate *minute;
+@property (nonatomic, copy, nullable) NSString *tradingDay;
+@property (nonatomic) BOOL previousCloseIsSettlement;
 @property (nonatomic) double price;
 @property (nonatomic) double previousClose;
 @property (nonatomic) double dayHigh;
@@ -30,6 +35,9 @@ NS_ASSUME_NONNULL_BEGIN
 NSArray<DesktopCandle *> *DesktopMergeMinuteCandles(NSArray<DesktopCandle *> *previous,
                                                     NSArray<DesktopCandle *> *history,
                                                     DesktopQuote *_Nullable quote);
+
+double DesktopPreviousTradingDayPrice(DesktopCandle *candle, NSArray<DesktopCandle *> *dailyCandles,
+                                      DesktopQuote *_Nullable quote, BOOL *isSettlement);
 
 @interface DesktopMarketService : NSObject
 + (NSArray<NSString *> *)defaultSymbols;

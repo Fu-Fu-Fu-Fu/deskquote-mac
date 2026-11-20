@@ -983,8 +983,8 @@ static NSString *TimeLabel(NSDate *time, NSString *format) {
             : quote.source;
         _detailMeta.stringValue = [NSString stringWithFormat:@"%@  ·  %@%@",
                                    source, failedQuote ? @"旧报价 " : @"报价 ", TimeLabel(quote.time, @"MM-dd HH:mm:ss")];
-        _detailStats.stringValue = [NSString stringWithFormat:@"昨收 %@     最高 %@     最低 %@",
-                                    Price(quote.previousClose, quote.precision),
+        _detailStats.stringValue = [NSString stringWithFormat:@"%@ %@     最高 %@     最低 %@",
+                                    quote.previousCloseIsSettlement ? @"昨结" : @"昨收", Price(quote.previousClose, quote.precision),
                                     Price(quote.dayHigh, quote.precision), Price(quote.dayLow, quote.precision)];
     } else {
         _detailPrice.stringValue = @"—";
@@ -997,6 +997,8 @@ static NSString *TimeLabel(NSDate *time, NSString *format) {
     }
     _chart.daily = daily;
     _chart.precision = quote ? quote.precision : 2;
+    _chart.dailyReferences = _dailyCandles ?: @[];
+    _chart.quote = quote;
     _chart.candles = candles ?: @[];
     if (daily && _chartFailed) {
         _detailStatus.stringValue = candles.count ? @"日线更新失败 · 显示上次成功获取的数据" : @"日线暂不可用 · 稍后重试";
@@ -1025,8 +1027,8 @@ static NSString *TimeLabel(NSDate *time, NSString *format) {
 }
 
 - (void)requestVisibleChart {
+    [self requestDailyChart];
     if (_range.selectedSegment == 1) {
-        [self requestDailyChart];
         return;
     }
 
@@ -1054,7 +1056,8 @@ static NSString *TimeLabel(NSDate *time, NSString *format) {
 }
 
 - (void)requestDailyChart {
-    if (!_detailSymbol || (_dailyCheckedAt && -_dailyCheckedAt.timeIntervalSinceNow < 60)) {
+    NSTimeInterval interval = _range.selectedSegment == 1 || !_dailyCandles.count ? 60 : 600;
+    if (!_detailSymbol || (_dailyCheckedAt && -_dailyCheckedAt.timeIntervalSinceNow < interval)) {
         return;
     }
     _dailyCheckedAt = NSDate.date;

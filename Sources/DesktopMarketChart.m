@@ -25,6 +25,7 @@ static NSUInteger const InitialVisibleCandles = 120;
     if (self) {
         _hovered = -1;
         _candles = @[];
+        _dailyReferences = @[];
         _precision = 2;
         _visibleLimit = InitialVisibleCandles;
         [self setAccessibilityElement:YES];
@@ -273,12 +274,14 @@ static void DrawText(NSString *text, NSPoint point, NSColor *color, CGFloat size
     int p = (int)self.precision;
     NSString *summary = [NSString stringWithFormat:@"%@   开 %.*f   高 %.*f   低 %.*f   收 %.*f",
                          [formatter stringFromDate:candle.time], p, candle.open, p, candle.high, p, candle.low, p, candle.close];
-    double previousClose = index > 0 ? self.candles[index - 1].close : NAN;
-    NSString *change = @"涨跌 —";
+    BOOL isSettlement = NO;
+    double previousClose = DesktopPreviousTradingDayPrice(candle, self.dailyReferences, self.quote, &isSettlement);
+    NSString *change = @"涨跌 —  ·  暂无上一交易日参考价";
     NSColor *changeColor = muted;
     if (isfinite(previousClose) && previousClose > 0) {
         double amount = candle.close - previousClose;
-        change = [NSString stringWithFormat:@"涨跌 %+.*f（%+.2f%%）  ·  较前一根收盘", p, amount, amount / previousClose * 100];
+        change = [NSString stringWithFormat:@"涨跌 %+.*f（%+.2f%%）  ·  %@ %.*f", p, amount,
+                  amount / previousClose * 100, isSettlement ? @"较昨结" : @"较昨收", p, previousClose];
         if (amount) {
             changeColor = DesktopColor(amount > 0 ? 0xFF808A : 0x59D7B9);
         }

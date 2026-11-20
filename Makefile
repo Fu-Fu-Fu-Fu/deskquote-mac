@@ -1,7 +1,7 @@
 PRODUCT_NAME := StockBar
 EXECUTABLE_NAME := StockBar
-VERSION := 0.8.3
-BUILD_NUMBER := 24
+VERSION := 0.8.4
+BUILD_NUMBER := 25
 BUILD_DIR := build
 DIST_DIR := dist
 APP_BUNDLE := $(BUILD_DIR)/StockBar.app

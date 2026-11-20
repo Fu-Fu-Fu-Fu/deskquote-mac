@@ -51,6 +51,43 @@ static BOOL IsPrice(double value) {
     return isfinite(value) && value > 0;
 }
 
+double DesktopPreviousTradingDayPrice(DesktopCandle *candle, NSArray<DesktopCandle *> *dailyCandles,
+                                      DesktopQuote *quote, BOOL *isSettlement) {
+    *isSettlement = NO;
+    NSString *day = candle.tradingDay;
+    if (!day.length) {
+        return NAN;
+    }
+    if ([day isEqualToString:quote.tradingDay] && IsPrice(quote.previousClose)) {
+        *isSettlement = quote.previousCloseIsSettlement;
+        return quote.previousClose;
+    }
+    if (IsPrice(candle.previousSessionClose)) {
+        return candle.previousSessionClose;
+    }
+
+    BOOL foundTradingDay = NO;
+    for (DesktopCandle *daily in [dailyCandles reverseObjectEnumerator]) {
+        if (!daily.tradingDay.length) {
+            continue;
+        }
+        NSComparisonResult order = [daily.tradingDay compare:day];
+        if (order == NSOrderedSame) {
+            foundTradingDay = YES;
+            if (IsPrice(daily.previousSessionClose)) {
+                return daily.previousSessionClose;
+            }
+        } else if (order == NSOrderedAscending) {
+            if (foundTradingDay) {
+                *isSettlement = IsPrice(daily.settlement);
+                return *isSettlement ? daily.settlement : daily.close;
+            }
+            break;
+        }
+    }
+    return NAN;
+}
+
 static DesktopCandle *Candle(NSDate *time, id open, id high, id low, id close) {
     double o = Number(open), h = Number(high), l = Number(low), c = Number(close);
     if (!time || !IsPrice(o) || !IsPrice(h) || !IsPrice(l) || !IsPrice(c) ||
@@ -86,17 +123,21 @@ NSArray<DesktopCandle *> *DesktopMergeMinuteCandles(NSArray<DesktopCandle *> *pr
     for (DesktopCandle *candle in history) {
         if ([candle.time isEqual:activeMinute] && byTime[candle.time]) {
             DesktopCandle *prior = byTime[candle.time];
-            byTime[candle.time] = Candle(candle.time, @(candle.open), @(fmax(candle.high, prior.high)),
-                                         @(fmin(candle.low, prior.low)), @(candle.close));
+            DesktopCandle *updated = Candle(candle.time, @(candle.open), @(fmax(candle.high, prior.high)),
+                                            @(fmin(candle.low, prior.low)), @(candle.close));
+            updated.tradingDay = candle.tradingDay ?: prior.tradingDay;
+            byTime[candle.time] = updated;
         } else {
             byTime[candle.time] = candle;
         }
     }
     if (activeMinute) {
         DesktopCandle *bar = byTime[activeMinute];
-        byTime[activeMinute] = Candle(activeMinute, @(bar ? bar.open : quote.price),
-                                     @(bar ? fmax(bar.high, quote.price) : quote.price),
-                                     @(bar ? fmin(bar.low, quote.price) : quote.price), @(quote.price));
+        DesktopCandle *updated = Candle(activeMinute, @(bar ? bar.open : quote.price),
+                                        @(bar ? fmax(bar.high, quote.price) : quote.price),
+                                        @(bar ? fmin(bar.low, quote.price) : quote.price), @(quote.price));
+        updated.tradingDay = quote.tradingDay ?: bar.tradingDay;
+        byTime[activeMinute] = updated;
     }
     NSArray<NSDate *> *times = [byTime.allKeys sortedArrayUsingSelector:@selector(compare:)];
     NSMutableArray<DesktopCandle *> *candles = [NSMutableArray arrayWithCapacity:times.count];
@@ -112,6 +153,26 @@ static NSDateFormatter *ShanghaiFormatter(NSString *format) {
     formatter.timeZone = [NSTimeZone timeZoneWithName:@"Asia/Shanghai"];
     formatter.dateFormat = format;
     return formatter;
+}
+
+static NSDateFormatter *TradingDayFormatter(NSTimeZone *timeZone) {
+    NSDateFormatter *formatter = ShanghaiFormatter(@"yyyy-MM-dd");
+    formatter.timeZone = timeZone;
+    return formatter;
+}
+
+static NSCalendar *NewYorkCalendar(void) {
+    NSCalendar *calendar = [[NSCalendar alloc] initWithCalendarIdentifier:NSCalendarIdentifierGregorian];
+    calendar.timeZone = [NSTimeZone timeZoneWithName:@"America/New_York"];
+    return calendar;
+}
+
+static NSString *TradingDay(NSDate *time, NSDateFormatter *formatter, NSCalendar *overnightCalendar) {
+    // New York evening sessions are part of the following trading day.
+    if (overnightCalendar && [overnightCalendar component:NSCalendarUnitHour fromDate:time] >= 18) {
+        time = [overnightCalendar dateByAddingUnit:NSCalendarUnitDay value:1 toDate:time options:0];
+    }
+    return [formatter stringFromDate:time];
 }
 
 static id JSON(NSData *data) {
@@ -255,13 +316,27 @@ static double YahooRegularSessionEnd(NSDictionary *meta) {
     return Number(Dictionary(At(sessions, 0))[@"end"]);
 }
 
+static BOOL YahooIsCMEFuture(NSDictionary *meta) {
+    return [String(meta[@"instrumentType"]) isEqualToString:@"FUTURE"] &&
+           [String(meta[@"exchangeName"]) isEqualToString:@"CME"];
+}
+
+static NSTimeZone *YahooTimeZone(NSDictionary *meta) {
+    NSString *zone = String(meta[@"exchangeTimezoneName"]);
+    return zone.length ? [NSTimeZone timeZoneWithName:zone] : nil;
+}
+
 - (NSArray<DesktopCandle *> *)yahooCandles:(NSDictionary *)result daily:(BOOL)daily {
     NSArray *times = result[@"timestamp"];
     if (![times isKindOfClass:NSArray.class]) {
         return @[];
     }
     NSDictionary *quote = Dictionary(At(Dictionary(result[@"indicators"])[@"quote"], 0));
-    double sessionEnd = YahooRegularSessionEnd(Dictionary(result[@"meta"]));
+    NSDictionary *meta = Dictionary(result[@"meta"]);
+    double sessionEnd = YahooRegularSessionEnd(meta);
+    NSCalendar *overnight = !daily && YahooIsCMEFuture(meta) ? NewYorkCalendar() : nil;
+    NSTimeZone *zone = overnight ? overnight.timeZone : YahooTimeZone(meta);
+    NSDateFormatter *dayFormatter = zone ? TradingDayFormatter(zone) : nil;
     NSMutableArray<DesktopCandle *> *candles = [NSMutableArray array];
     for (NSUInteger i = 0; i < times.count; i++) {
         double timestamp = Number(times[i]);
@@ -272,6 +347,7 @@ static double YahooRegularSessionEnd(NSDictionary *meta) {
                                             At(quote[@"open"], i), At(quote[@"high"], i),
                                             At(quote[@"low"], i), At(quote[@"close"], i));
             if (candle) {
+                candle.tradingDay = TradingDay(candle.time, dayFormatter, overnight);
                 [candles addObject:candle];
             }
         }
@@ -306,6 +382,11 @@ static double YahooRegularSessionEnd(NSDictionary *meta) {
         quote.minute = [NSDate dateWithTimeIntervalSince1970:end - 60];
     } else {
         quote.minute = MinuteStart(quote.time);
+    }
+    NSCalendar *overnight = YahooIsCMEFuture(meta) ? NewYorkCalendar() : nil;
+    NSTimeZone *zone = overnight ? overnight.timeZone : YahooTimeZone(meta);
+    if (zone) {
+        quote.tradingDay = TradingDay(quote.minute ?: quote.time, TradingDayFormatter(zone), overnight);
     }
     double precision = Number(meta[@"priceHint"]);
     quote.precision = isfinite(precision) && precision >= 0 && precision <= 8 ? (NSInteger)precision : 2;
@@ -357,6 +438,10 @@ static double YahooRegularSessionEnd(NSDictionary *meta) {
     quote.minute = minute;
     quote.price = price;
     quote.previousClose = Number(At(fields, domestic ? 2 : 7));
+    quote.previousCloseIsSettlement = [symbol isEqualToString:CFDSymbol];
+    NSCalendar *overnight = domestic ? nil : NewYorkCalendar();
+    NSDateFormatter *dayFormatter = TradingDayFormatter(overnight ? overnight.timeZone : formatter.timeZone);
+    quote.tradingDay = TradingDay(minute ?: time, dayFormatter, overnight);
     quote.dayHigh = Number(At(fields, 4));
     quote.dayLow = Number(At(fields, 5));
     quote.precision = 2;
@@ -380,6 +465,7 @@ static double YahooRegularSessionEnd(NSDictionary *meta) {
     quote.minute = MinuteStart(quote.time);
     quote.price = price;
     quote.previousClose = Number(payload[@"yesterdayPrice"]);
+    quote.tradingDay = [ShanghaiFormatter(@"yyyy-MM-dd") stringFromDate:quote.time];
     quote.dayHigh = NAN;
     quote.dayLow = NAN;
     quote.precision = 2;
@@ -413,12 +499,15 @@ static double YahooRegularSessionEnd(NSDictionary *meta) {
 }
 
 static NSArray<DesktopCandle *> *ParseCandles(id rows, NSString *dateFormat, NSArray<NSString *> *keys,
-                                              NSTimeInterval offset, NSUInteger limit) {
+                                              NSTimeInterval offset, NSUInteger limit, BOOL crossesMidnight,
+                                              NSString *previousCloseKey, NSString *settlementKey) {
     if (![rows isKindOfClass:NSArray.class]) {
         return @[];
     }
     NSArray *items = rows;
     NSDateFormatter *formatter = ShanghaiFormatter(dateFormat);
+    NSCalendar *overnight = crossesMidnight ? NewYorkCalendar() : nil;
+    NSDateFormatter *dayFormatter = TradingDayFormatter(overnight ? overnight.timeZone : formatter.timeZone);
     NSMutableArray<DesktopCandle *> *candles = [NSMutableArray array];
     NSUInteger first = items.count > limit ? items.count - limit : 0;
     for (NSUInteger i = first; i < items.count; i++) {
@@ -430,6 +519,13 @@ static NSArray<DesktopCandle *> *ParseCandles(id rows, NSString *dateFormat, NSA
         NSDate *time = [[formatter dateFromString:date] dateByAddingTimeInterval:offset];
         DesktopCandle *candle = Candle(time, row[keys[1]], row[keys[2]], row[keys[3]], row[keys[4]]);
         if (candle) {
+            candle.tradingDay = TradingDay(candle.time, dayFormatter, overnight);
+            if (previousCloseKey) {
+                candle.previousSessionClose = Number(row[previousCloseKey]);
+            }
+            if (settlementKey) {
+                candle.settlement = Number(row[settlementKey]);
+            }
             [candles addObject:candle];
         }
     }
@@ -467,7 +563,7 @@ static id JSONPArray(NSData *data) {
     [self send:request completion:^(NSData *data) {
         NSDictionary *payload = Dictionary(Dictionary(Dictionary(JSON(data))[@"resultData"])[@"data"]);
         NSArray<DesktopCandle *> *candles = ParseCandles(payload[@"dots"] ?: payload[@"dotDos"],
-            @"yyyy-MM-dd'T'HH:mm:ss", @[@"tradeDateTime", @"openPrice", @"highPrice", @"lowPrice", @"closePrice"], 0, limit);
+            @"yyyy-MM-dd'T'HH:mm:ss", @[@"tradeDateTime", @"openPrice", @"highPrice", @"lowPrice", @"closePrice"], 0, limit, NO, daily ? @"preClose" : nil, nil);
         dispatch_async(dispatch_get_main_queue(), ^{ completion(candles); });
     }];
 }
@@ -484,7 +580,7 @@ static id JSONPArray(NSData *data) {
         [self get:url referer:SinaReferer completion:^(NSData *data) {
             id rows = Dictionary(Dictionary(JSON(data))[@"result"])[@"data"];
             NSArray<DesktopCandle *> *candles = ParseCandles(rows, daily ? @"yyyy-MM-dd" : @"yyyy-MM-dd HH:mm:ss",
-                @[@"day", @"open", @"high", @"low", @"close"], daily ? 0 : -60, limit);
+                @[@"day", @"open", @"high", @"low", @"close"], daily ? 0 : -60, limit, NO, nil, nil);
             dispatch_async(dispatch_get_main_queue(), ^{ completion(candles); });
         }];
     } else if (sinaSymbol) {
@@ -495,7 +591,8 @@ static id JSONPArray(NSData *data) {
         [self get:url referer:SinaReferer completion:^(NSData *data) {
             NSArray *keys = daily ? @[@"date", @"open", @"high", @"low", @"close"] : @[@"d", @"o", @"h", @"l", @"c"];
             NSArray<DesktopCandle *> *candles = ParseCandles(JSONPArray(data), daily ? @"yyyy-MM-dd" : @"yyyy-MM-dd HH:mm:ss",
-                                                             keys, daily ? 0 : -60, daily ? 400 : (extended ? 1023 : 300));
+                                                             keys, daily ? 0 : -60, daily ? 400 : (extended ? 1023 : 300),
+                                                             !daily, nil, daily ? @"settlement" : nil);
             dispatch_async(dispatch_get_main_queue(), ^{ completion(candles); });
         }];
     } else {
