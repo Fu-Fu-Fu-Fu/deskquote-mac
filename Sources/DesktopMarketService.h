@@ -42,6 +42,7 @@ NSArray<DesktopCandle *> *DesktopMergeMinuteCandles(NSArray<DesktopCandle *> *pr
         completion:(void (^)(DesktopQuote * _Nullable quote, NSArray<DesktopCandle *> *candles))completion;
 - (void)fetchCandles:(NSString *)symbol
               daily:(BOOL)daily
+           extended:(BOOL)extended
          completion:(void (^)(NSArray<DesktopCandle *> *candles))completion;
 @end
 

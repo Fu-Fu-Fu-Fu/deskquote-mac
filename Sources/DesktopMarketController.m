@@ -229,6 +229,10 @@ static NSString *TimeLabel(NSDate *time, NSString *format) {
     NSTextField *_detailStatus;
     NSSegmentedControl *_range;
     DesktopMarketChart *_chart;
+    NSArray<DesktopCandle *> *_detailMinuteHistory;
+    NSDate *_detailMinuteCheckedAt;
+    BOOL _detailMinuteLoading;
+    BOOL _detailMinuteFailed;
     NSArray<DesktopCandle *> *_dailyCandles;
     NSDate *_dailyCheckedAt;
     BOOL _chartFailed;
@@ -796,7 +800,9 @@ static NSString *TimeLabel(NSDate *time, NSString *format) {
 }
 
 - (void)mergeHistory:(NSArray<DesktopCandle *> *)candles forSymbol:(NSString *)symbol {
-    _intraday[symbol] = DesktopMergeMinuteCandles(_intraday[symbol] ?: @[], candles, _quotes[symbol]);
+    NSArray<DesktopCandle *> *merged = DesktopMergeMinuteCandles(_intraday[symbol] ?: @[], candles, _quotes[symbol]);
+    NSUInteger first = merged.count > 300 ? merged.count - 300 : 0;
+    _intraday[symbol] = [merged subarrayWithRange:NSMakeRange(first, merged.count - first)];
 }
 
 - (void)refresh {
@@ -824,8 +830,8 @@ static NSString *TimeLabel(NSDate *time, NSString *format) {
             [self requestMinuteHistory:symbol];
         }
     }
-    if (_detail.isVisible && _range.selectedSegment == 1) {
-        [self requestDailyChart];
+    if (_detail.isVisible) {
+        [self requestVisibleChart];
     }
 }
 
@@ -857,7 +863,7 @@ static NSString *TimeLabel(NSDate *time, NSString *format) {
     NSUUID *request = [NSUUID UUID];
     _historyRequests[symbol] = request;
     __weak DesktopMarketController *weakSelf = self;
-    [_service fetchCandles:symbol daily:NO completion:^(NSArray<DesktopCandle *> *candles) {
+    [_service fetchCandles:symbol daily:NO extended:NO completion:^(NSArray<DesktopCandle *> *candles) {
         DesktopMarketController *owner = weakSelf;
         if (!owner || ![owner->_historyRequests[symbol] isEqual:request]) {
             return;
@@ -887,6 +893,11 @@ static NSString *TimeLabel(NSDate *time, NSString *format) {
     if (![_detailSymbol isEqualToString:symbol]) {
         _detailSymbol = [symbol copy];
         _detailGeneration++;
+        _detailMinuteHistory = nil;
+        _detailMinuteCheckedAt = nil;
+        _detailMinuteLoading = NO;
+        _detailMinuteFailed = NO;
+        [_chart resetViewport];
         _dailyCandles = nil;
         _dailyCheckedAt = nil;
         _chartFailed = NO;
@@ -933,6 +944,10 @@ static NSString *TimeLabel(NSDate *time, NSString *format) {
                                NSMakeRect(width - 108, height - 111, 88, 24));
     [root addSubview:website];
     website.autoresizingMask = NSViewMinXMargin | NSViewMinYMargin;
+    NSButton *latest = Button(@"回到最新", @"回到最新 K 线", self, @selector(showLatestCandles:),
+                              NSMakeRect(width - 190, height - 111, 74, 24));
+    [root addSubview:latest];
+    latest.autoresizingMask = NSViewMinXMargin | NSViewMinYMargin;
 
     _chart = [[DesktopMarketChart alloc] initWithFrame:NSMakeRect(20, 68, width - 40, height - 190)];
     _chart.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
@@ -977,28 +992,65 @@ static NSString *TimeLabel(NSDate *time, NSString *format) {
         _detailStats.stringValue = @"";
     }
     NSArray<DesktopCandle *> *candles = daily ? _dailyCandles : _intraday[symbol];
+    if (!daily && _detailMinuteHistory.count) {
+        candles = DesktopMergeMinuteCandles(_detailMinuteHistory, candles ?: @[], nil);
+    }
     _chart.daily = daily;
     _chart.precision = quote ? quote.precision : 2;
-    _chart.candles = candles.count > 120 ? [candles subarrayWithRange:NSMakeRange(candles.count - 120, 120)] : (candles ?: @[]);
+    _chart.candles = candles ?: @[];
     if (daily && _chartFailed) {
         _detailStatus.stringValue = candles.count ? @"日线更新失败 · 显示上次成功获取的数据" : @"日线暂不可用 · 稍后重试";
-    } else if (!daily && [_minuteHistoryFailures containsObject:symbol]) {
-        _detailStatus.stringValue = @"分钟历史暂不可用 · 新报价仍会更新图表";
+    } else if (!daily && _detailMinuteLoading && !_detailMinuteHistory.count) {
+        _detailStatus.stringValue = @"正在加载更早的分钟 K 线…";
+    } else if (!daily && (_detailMinuteFailed || [_minuteHistoryFailures containsObject:symbol]) && !_detailMinuteHistory.count) {
+        _detailStatus.stringValue = @"历史分钟线暂不可用 · 稍后自动重试";
     } else if (!candles.count) {
         _detailStatus.stringValue = daily ? @"正在获取日线…" : @"正在获取 1 分钟 K 线…";
     } else {
-        _detailStatus.stringValue = daily
-            ? @"将鼠标移到 K 线上查看开、高、低、收 · 时间为本机时区"
-            : @"最新一根随源端报价更新 · 将鼠标移到 K 线上查看开、高、低、收";
+        _detailStatus.stringValue = [NSString stringWithFormat:@"已加载 %lu 根 · 左右拖动看历史 · 滚轮缩放 · 悬停查看涨跌",
+                                     (unsigned long)candles.count];
     }
+}
+
+- (void)showLatestCandles:(id)sender {
+    (void)sender;
+    [_chart showLatest];
 }
 
 - (void)changeRange:(id)sender {
     (void)sender;
+    [_chart resetViewport];
+    [self requestVisibleChart];
     [self renderDetail];
+}
+
+- (void)requestVisibleChart {
     if (_range.selectedSegment == 1) {
         [self requestDailyChart];
+        return;
     }
+
+    NSTimeInterval interval = _detailMinuteHistory.count ? 600 : 30;
+    if (!_detailSymbol || _detailMinuteLoading ||
+        (_detailMinuteCheckedAt && -_detailMinuteCheckedAt.timeIntervalSinceNow < interval)) {
+        return;
+    }
+    _detailMinuteCheckedAt = NSDate.date;
+    _detailMinuteLoading = YES;
+    NSUInteger generation = _detailGeneration;
+    __weak DesktopMarketController *weakSelf = self;
+    [_service fetchCandles:_detailSymbol daily:NO extended:YES completion:^(NSArray<DesktopCandle *> *candles) {
+        DesktopMarketController *owner = weakSelf;
+        if (!owner || owner->_detailGeneration != generation) {
+            return;
+        }
+        owner->_detailMinuteLoading = NO;
+        owner->_detailMinuteFailed = candles.count == 0;
+        if (candles.count) {
+            owner->_detailMinuteHistory = candles;
+        }
+        [owner renderDetail];
+    }];
 }
 
 - (void)requestDailyChart {
@@ -1008,7 +1060,7 @@ static NSString *TimeLabel(NSDate *time, NSString *format) {
     _dailyCheckedAt = NSDate.date;
     NSUInteger generation = _detailGeneration;
     __weak DesktopMarketController *weakSelf = self;
-    [_service fetchCandles:_detailSymbol daily:YES completion:^(NSArray<DesktopCandle *> *candles) {
+    [_service fetchCandles:_detailSymbol daily:YES extended:YES completion:^(NSArray<DesktopCandle *> *candles) {
         DesktopMarketController *owner = weakSelf;
         if (!owner || owner->_detailGeneration != generation) {
             return;
@@ -1039,6 +1091,11 @@ static NSString *TimeLabel(NSDate *time, NSString *format) {
     if (closingPanel) {
         [_panel saveFrameUsingName:_panel == _homePanel ? PanelFrame : FloatingPanelFrame];
         [NSUserDefaults.standardUserDefaults setBool:NO forKey:VisibleKey];
+    }
+    if (notification.object == _detail) {
+        _detailSymbol = nil;
+        _detailGeneration++;
+        _detailMinuteHistory = nil;
     }
     // The notification arrives before AppKit orders the closing window out.
     dispatch_async(dispatch_get_main_queue(), ^{ [self updateTimer]; });

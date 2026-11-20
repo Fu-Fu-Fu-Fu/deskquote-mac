@@ -1,7 +1,7 @@
 PRODUCT_NAME := StockBar
 EXECUTABLE_NAME := StockBar
-VERSION := 0.8.2
-BUILD_NUMBER := 23
+VERSION := 0.8.3
+BUILD_NUMBER := 24
 BUILD_DIR := build
 DIST_DIR := dist
 APP_BUNDLE := $(BUILD_DIR)/StockBar.app
@@ -30,6 +30,7 @@ FRAMEWORKS := -framework AppKit -framework Foundation -framework CoreFoundation 
 HARDWARE_SMOKE := $(BUILD_DIR)/TouchBarHardwareSmoke
 QUOTE_SMOKE := $(BUILD_DIR)/QuoteServiceSmoke
 INDEX_SMOKE := $(BUILD_DIR)/IndexQuoteSmoke
+MARKET_CHART_TEST := $(BUILD_DIR)/DesktopMarketChartTest
 MINUTE_TEST := $(BUILD_DIR)/DesktopMarketMinuteTest
 FUND_TEST := $(BUILD_DIR)/FundSupportTest
 GROUP_TEST := $(BUILD_DIR)/WatchlistGroupsTest
@@ -139,7 +140,12 @@ $(SEARCH_PANEL_TEST): Tests/StockSearchPanelTest.m Sources/AddStockMenuItemView.
 	@mkdir -p "$(BUILD_DIR)"
 	$(CC) $(COMMON_CFLAGS) -mmacosx-version-min=10.14 Tests/StockSearchPanelTest.m Sources/AddStockMenuItemView.m Sources/StockSearchWindowController.m Sources/StockSearchService.m Sources/WatchlistStore.m -framework AppKit -framework Foundation -framework CoreFoundation -o "$@"
 
-ui-test: $(GROUP_TABS_TEST) $(GROUP_SELECTION_TEST) $(GROUP_POPUP_TEST) $(SEARCH_PANEL_TEST)
+$(MARKET_CHART_TEST): Tests/DesktopMarketChartTest.m Sources/DesktopMarketChart.m Sources/DesktopMarketService.m $(HEADERS)
+	@mkdir -p "$(BUILD_DIR)"
+	$(CC) $(COMMON_CFLAGS) -mmacosx-version-min=10.14 Tests/DesktopMarketChartTest.m Sources/DesktopMarketChart.m Sources/DesktopMarketService.m $(FRAMEWORKS) -o "$@"
+
+ui-test: $(MARKET_CHART_TEST) $(GROUP_TABS_TEST) $(GROUP_SELECTION_TEST) $(GROUP_POPUP_TEST) $(SEARCH_PANEL_TEST)
+	"$(MARKET_CHART_TEST)"
 	"$(GROUP_TABS_TEST)" "$(BUILD_DIR)/group-tabs.png"
 	"$(GROUP_SELECTION_TEST)"
 	"$(GROUP_POPUP_TEST)"

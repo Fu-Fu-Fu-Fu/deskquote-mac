@@ -99,10 +99,9 @@ NSArray<DesktopCandle *> *DesktopMergeMinuteCandles(NSArray<DesktopCandle *> *pr
                                      @(bar ? fmin(bar.low, quote.price) : quote.price), @(quote.price));
     }
     NSArray<NSDate *> *times = [byTime.allKeys sortedArrayUsingSelector:@selector(compare:)];
-    NSUInteger first = times.count > 300 ? times.count - 300 : 0;
-    NSMutableArray<DesktopCandle *> *candles = [NSMutableArray arrayWithCapacity:times.count - first];
-    for (NSUInteger i = first; i < times.count; i++) {
-        [candles addObject:byTime[times[i]]];
+    NSMutableArray<DesktopCandle *> *candles = [NSMutableArray arrayWithCapacity:times.count];
+    for (NSDate *time in times) {
+        [candles addObject:byTime[time]];
     }
     return candles;
 }
@@ -229,9 +228,10 @@ static NSString *PathSymbol(NSString *symbol) {
     }] resume];
 }
 
-- (void)yahooResponse:(NSString *)symbol daily:(BOOL)daily completion:(void (^)(NSDictionary *))completion {
+- (void)yahooResponse:(NSString *)symbol range:(NSString *)range daily:(BOOL)daily
+           completion:(void (^)(NSDictionary *))completion {
     NSString *path = [NSString stringWithFormat:@"/v8/finance/chart/%@?range=%@&interval=%@&includePrePost=false",
-                      PathSymbol(symbol), daily ? @"6mo" : @"1d", daily ? @"1d" : @"1m"];
+                      PathSymbol(symbol), range, daily ? @"1d" : @"1m"];
     [self get:[@"https://query1.finance.yahoo.com" stringByAppendingString:path] referer:nil completion:^(NSData *data) {
         NSDictionary *root = Dictionary(Dictionary(JSON(data))[@"chart"]);
         NSDictionary *result = Dictionary(At(root[@"result"], 0));
@@ -250,7 +250,8 @@ static double YahooRegularSessionEnd(NSDictionary *meta) {
     if ([String(meta[@"instrumentType"]) isEqualToString:@"FUTURE"]) {
         return NAN;
     }
-    NSArray *sessions = At(meta[@"tradingPeriods"], 0);
+    id periods = meta[@"tradingPeriods"];
+    NSArray *sessions = [periods isKindOfClass:NSArray.class] ? [periods lastObject] : nil;
     return Number(Dictionary(At(sessions, 0))[@"end"]);
 }
 
@@ -404,7 +405,7 @@ static double YahooRegularSessionEnd(NSDictionary *meta) {
         }];
         return;
     }
-    [self yahooResponse:symbol daily:NO completion:^(NSDictionary *result) {
+    [self yahooResponse:symbol range:@"1d" daily:NO completion:^(NSDictionary *result) {
         DesktopQuote *quote = [self yahooQuote:result symbol:symbol];
         NSArray *candles = [self yahooCandles:result daily:NO];
         dispatch_async(dispatch_get_main_queue(), ^{ completion(quote, candles); });
@@ -412,14 +413,14 @@ static double YahooRegularSessionEnd(NSDictionary *meta) {
 }
 
 static NSArray<DesktopCandle *> *ParseCandles(id rows, NSString *dateFormat, NSArray<NSString *> *keys,
-                                              NSTimeInterval offset) {
+                                              NSTimeInterval offset, NSUInteger limit) {
     if (![rows isKindOfClass:NSArray.class]) {
         return @[];
     }
     NSArray *items = rows;
     NSDateFormatter *formatter = ShanghaiFormatter(dateFormat);
     NSMutableArray<DesktopCandle *> *candles = [NSMutableArray array];
-    NSUInteger first = items.count > 300 ? items.count - 300 : 0;
+    NSUInteger first = items.count > limit ? items.count - limit : 0;
     for (NSUInteger i = first; i < items.count; i++) {
         NSDictionary *row = Dictionary(items[i]);
         NSString *date = String(row[keys[0]]);
@@ -449,9 +450,9 @@ static id JSONPArray(NSData *data) {
     return JSON([[body substringWithRange:range] dataUsingEncoding:NSUTF8StringEncoding]);
 }
 
-- (void)fetchBankGoldCandlesDaily:(BOOL)daily completion:(void (^)(NSArray<DesktopCandle *> *))completion {
+- (void)fetchBankGoldCandlesDaily:(BOOL)daily limit:(NSUInteger)limit completion:(void (^)(NSArray<DesktopCandle *> *))completion {
     NSDateFormatter *formatter = ShanghaiFormatter(@"yyyy-MM-dd'T'HH:mm:ss");
-    NSDictionary *parameters = @{@"productSku": JDBankGoldSKU, @"barCount": @120, @"kType": daily ? @"day" : @"m1",
+    NSDictionary *parameters = @{@"productSku": JDBankGoldSKU, @"barCount": @(limit), @"kType": daily ? @"day" : @"m1",
                                  @"from": [formatter stringFromDate:NSDate.date], @"withHistory": @YES, @"source": @"gold-chart"};
     NSData *json = [NSJSONSerialization dataWithJSONObject:parameters options:0 error:NULL];
     NSString *value = [[NSString alloc] initWithData:json encoding:NSUTF8StringEncoding];
@@ -466,21 +467,24 @@ static id JSONPArray(NSData *data) {
     [self send:request completion:^(NSData *data) {
         NSDictionary *payload = Dictionary(Dictionary(Dictionary(JSON(data))[@"resultData"])[@"data"]);
         NSArray<DesktopCandle *> *candles = ParseCandles(payload[@"dots"] ?: payload[@"dotDos"],
-            @"yyyy-MM-dd'T'HH:mm:ss", @[@"tradeDateTime", @"openPrice", @"highPrice", @"lowPrice", @"closePrice"], 0);
+            @"yyyy-MM-dd'T'HH:mm:ss", @[@"tradeDateTime", @"openPrice", @"highPrice", @"lowPrice", @"closePrice"], 0, limit);
         dispatch_async(dispatch_get_main_queue(), ^{ completion(candles); });
     }];
 }
 
-- (void)fetchCandles:(NSString *)symbol daily:(BOOL)daily completion:(void (^)(NSArray<DesktopCandle *> *))completion {
+- (void)fetchCandles:(NSString *)symbol daily:(BOOL)daily extended:(BOOL)extended
+         completion:(void (^)(NSArray<DesktopCandle *> *))completion {
     NSString *sinaSymbol = SinaSymbols()[symbol];
     if ([symbol isEqualToString:BankGoldSymbol]) {
-        [self fetchBankGoldCandlesDaily:daily completion:completion];
+        [self fetchBankGoldCandlesDaily:daily limit:daily ? 400 : (extended ? 2000 : 120) completion:completion];
     } else if (IsShanghaiIndex(symbol)) {
-        NSString *url = [NSString stringWithFormat:@"https://quotes.sina.cn/cn/api/openapi.php/CN_MarketDataService.getKLineData?symbol=%@&scale=%@&ma=no&datalen=150", sinaSymbol, daily ? @"240" : @"1"];
+        NSUInteger limit = daily ? 400 : (extended ? 1023 : 150);
+        NSString *url = [NSString stringWithFormat:@"https://quotes.sina.cn/cn/api/openapi.php/CN_MarketDataService.getKLineData?symbol=%@&scale=%@&ma=no&datalen=%lu",
+                         sinaSymbol, daily ? @"240" : @"1", (unsigned long)limit];
         [self get:url referer:SinaReferer completion:^(NSData *data) {
             id rows = Dictionary(Dictionary(JSON(data))[@"result"])[@"data"];
             NSArray<DesktopCandle *> *candles = ParseCandles(rows, daily ? @"yyyy-MM-dd" : @"yyyy-MM-dd HH:mm:ss",
-                @[@"day", @"open", @"high", @"low", @"close"], daily ? 0 : -60);
+                @[@"day", @"open", @"high", @"low", @"close"], daily ? 0 : -60, limit);
             dispatch_async(dispatch_get_main_queue(), ^{ completion(candles); });
         }];
     } else if (sinaSymbol) {
@@ -491,11 +495,12 @@ static id JSONPArray(NSData *data) {
         [self get:url referer:SinaReferer completion:^(NSData *data) {
             NSArray *keys = daily ? @[@"date", @"open", @"high", @"low", @"close"] : @[@"d", @"o", @"h", @"l", @"c"];
             NSArray<DesktopCandle *> *candles = ParseCandles(JSONPArray(data), daily ? @"yyyy-MM-dd" : @"yyyy-MM-dd HH:mm:ss",
-                                                             keys, daily ? 0 : -60);
+                                                             keys, daily ? 0 : -60, daily ? 400 : (extended ? 1023 : 300));
             dispatch_async(dispatch_get_main_queue(), ^{ completion(candles); });
         }];
     } else {
-        [self yahooResponse:symbol daily:daily completion:^(NSDictionary *result) {
+        NSString *range = daily ? @"1y" : (extended ? @"5d" : @"1d");
+        [self yahooResponse:symbol range:range daily:daily completion:^(NSDictionary *result) {
             NSArray *candles = [self yahooCandles:result daily:daily];
             dispatch_async(dispatch_get_main_queue(), ^{ completion(candles); });
         }];

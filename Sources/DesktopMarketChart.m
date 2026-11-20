@@ -1,14 +1,23 @@
 #import "DesktopMarketChart.h"
 #import "DesktopMarketService.h"
+#import <math.h>
 
 NSColor *DesktopColor(unsigned int rgb) {
     return [NSColor colorWithSRGBRed:((rgb >> 16) & 255) / 255.0
                                green:((rgb >> 8) & 255) / 255.0 blue:(rgb & 255) / 255.0 alpha:1];
 }
 
+static NSUInteger const InitialVisibleCandles = 120;
+
 @implementation DesktopMarketChart {
     NSInteger _hovered;
     NSTrackingArea *_tracking;
+    NSUInteger _visibleLimit;
+    NSDate *_rightEdgeTime;
+    NSDate *_dragEdgeTime;
+    CGFloat _dragStartX;
+    BOOL _dragging;
+    CGFloat _scrollRemainder;
 }
 
 - (instancetype)initWithFrame:(NSRect)frame {
@@ -17,6 +26,7 @@ NSColor *DesktopColor(unsigned int rgb) {
         _hovered = -1;
         _candles = @[];
         _precision = 2;
+        _visibleLimit = InitialVisibleCandles;
         [self setAccessibilityElement:YES];
         [self setAccessibilityRole:NSAccessibilityImageRole];
         [self setAccessibilityLabel:@"价格图表"];
@@ -26,9 +36,52 @@ NSColor *DesktopColor(unsigned int rgb) {
 
 - (void)setCandles:(NSArray<DesktopCandle *> *)candles {
     _candles = [candles copy];
-    if (_hovered >= (NSInteger)_candles.count) {
-        _hovered = -1;
+    if (!_candles.count && !self.miniature) {
+        [self setAccessibilityValue:nil];
     }
+    self.needsDisplay = YES;
+}
+
+- (NSUInteger)endIndexAtTime:(NSDate *)time {
+    NSUInteger lower = 0, upper = self.candles.count;
+    while (lower < upper) {
+        NSUInteger mid = lower + (upper - lower) / 2;
+        if ([self.candles[mid].time compare:time] == NSOrderedDescending) {
+            upper = mid;
+        } else {
+            lower = mid + 1;
+        }
+    }
+    return lower;
+}
+
+- (NSRange)visibleCandleRange {
+    NSUInteger total = self.candles.count;
+    if (self.miniature) {
+        return NSMakeRange(0, total);
+    }
+    NSUInteger length = MIN(total, _visibleLimit);
+    NSUInteger end = _rightEdgeTime ? [self endIndexAtTime:_rightEdgeTime] : total;
+    return NSMakeRange(MAX(length, end) - length, length);
+}
+
+- (void)showLatest {
+    _rightEdgeTime = nil;
+    _hovered = -1;
+    _scrollRemainder = 0;
+    self.needsDisplay = YES;
+}
+
+- (void)resetViewport {
+    _visibleLimit = InitialVisibleCandles;
+    [self showLatest];
+}
+
+- (void)moveRightEdgeToIndex:(NSInteger)index {
+    NSInteger total = (NSInteger)self.candles.count;
+    NSInteger minimum = MIN(total, (NSInteger)_visibleLimit);
+    NSInteger end = MAX(minimum, MIN(total, index));
+    _rightEdgeTime = end < total ? self.candles[(NSUInteger)end - 1].time : nil;
     self.needsDisplay = YES;
 }
 
@@ -49,18 +102,22 @@ NSColor *DesktopColor(unsigned int rgb) {
 
 - (NSRect)plot {
     NSRect bounds = self.bounds;
-    return self.miniature ? NSInsetRect(bounds, 2, 4) : NSMakeRect(12, 32, NSWidth(bounds) - 96, NSHeight(bounds) - 64);
+    return self.miniature ? NSInsetRect(bounds, 2, 4) : NSMakeRect(12, 32, NSWidth(bounds) - 96, NSHeight(bounds) - 84);
+}
+
+- (void)updateHoverAtPoint:(NSPoint)point {
+    NSRect plot = [self plot];
+    NSRange visible = self.visibleCandleRange;
+    _hovered = -1;
+    if (visible.length && NSPointInRect(point, plot)) {
+        CGFloat fraction = (point.x - NSMinX(plot)) / NSWidth(plot);
+        _hovered = (NSInteger)MIN(visible.length - 1, (NSUInteger)(fraction * visible.length));
+    }
+    self.needsDisplay = YES;
 }
 
 - (void)mouseMoved:(NSEvent *)event {
-    NSPoint point = [self convertPoint:event.locationInWindow fromView:nil];
-    NSRect plot = [self plot];
-    _hovered = -1;
-    if (self.candles.count && NSPointInRect(point, plot)) {
-        CGFloat fraction = (point.x - NSMinX(plot)) / NSWidth(plot);
-        _hovered = MIN((NSInteger)self.candles.count - 1, (NSInteger)(fraction * self.candles.count));
-    }
-    self.needsDisplay = YES;
+    [self updateHoverAtPoint:[self convertPoint:event.locationInWindow fromView:nil]];
 }
 
 - (void)mouseEntered:(NSEvent *)event {
@@ -71,6 +128,70 @@ NSColor *DesktopColor(unsigned int rgb) {
     (void)event;
     _hovered = -1;
     self.needsDisplay = YES;
+}
+
+- (void)mouseDown:(NSEvent *)event {
+    NSPoint point = [self convertPoint:event.locationInWindow fromView:nil];
+    NSRange visible = self.visibleCandleRange;
+    _dragging = !self.miniature && visible.length && NSPointInRect(point, [self plot]);
+    if (_dragging) {
+        _dragStartX = point.x;
+        _dragEdgeTime = self.candles[NSMaxRange(visible) - 1].time;
+        [NSCursor.closedHandCursor set];
+        [self updateHoverAtPoint:point];
+    }
+}
+
+- (void)mouseDragged:(NSEvent *)event {
+    if (!_dragging) {
+        return;
+    }
+    NSPoint point = [self convertPoint:event.locationInWindow fromView:nil];
+    CGFloat width = NSWidth([self plot]);
+    if (width > 0) {
+        NSInteger bars = lround((point.x - _dragStartX) * self.visibleCandleRange.length / width);
+        [self moveRightEdgeToIndex:(NSInteger)[self endIndexAtTime:_dragEdgeTime] - bars];
+        [self updateHoverAtPoint:point];
+    }
+}
+
+- (void)mouseUp:(NSEvent *)event {
+    if (_dragging) {
+        _dragging = NO;
+        _dragEdgeTime = nil;
+        [NSCursor.arrowCursor set];
+        [self mouseMoved:event];
+    }
+}
+
+- (void)scrollWheel:(NSEvent *)event {
+    NSRange visible = self.visibleCandleRange;
+    NSRect plot = [self plot];
+    if (self.miniature || !visible.length || NSWidth(plot) <= 0) {
+        [super scrollWheel:event];
+        return;
+    }
+
+    NSPoint point = [self convertPoint:event.locationInWindow fromView:nil];
+    CGFloat dx = event.scrollingDeltaX, dy = event.scrollingDeltaY;
+    if (fabs(dx) > fabs(dy)) {
+        CGFloat scale = event.hasPreciseScrollingDeltas ? visible.length / NSWidth(plot) : 3.0;
+        _scrollRemainder += dx * scale;
+        NSInteger bars = (NSInteger)_scrollRemainder;
+        _scrollRemainder -= bars;
+        [self moveRightEdgeToIndex:(NSInteger)NSMaxRange(visible) - bars];
+    } else if (dy) {
+        double scale = exp(-dy * (event.hasPreciseScrollingDeltas ? 0.018 : 0.18));
+        NSUInteger total = self.candles.count;
+        NSUInteger length = (NSUInteger)fmax(MIN(18, total), fmin(total, round(visible.length * scale)));
+        if (length != visible.length) {
+            CGFloat fraction = fmax(0, fmin(1, (point.x - NSMinX(plot)) / NSWidth(plot)));
+            NSInteger end = (NSInteger)NSMaxRange(visible) + lround(((NSInteger)length - (NSInteger)visible.length) * (1 - fraction));
+            _visibleLimit = length;
+            [self moveRightEdgeToIndex:end];
+        }
+    }
+    [self updateHoverAtPoint:point];
 }
 
 static void DrawText(NSString *text, NSPoint point, NSColor *color, CGFloat size) {
@@ -87,7 +208,8 @@ static void DrawText(NSString *text, NSPoint point, NSColor *color, CGFloat size
         [DesktopColor(0x111B2A) setFill];
         [[NSBezierPath bezierPathWithRoundedRect:self.bounds xRadius:12 yRadius:12] fill];
     }
-    if (self.candles.count == 0 || NSWidth(plot) <= 0 || NSHeight(plot) <= 0) {
+    NSRange visible = self.visibleCandleRange;
+    if (!visible.length || NSWidth(plot) <= 0 || NSHeight(plot) <= 0) {
         if (!self.miniature) {
             DrawText(@"暂无 K 线", NSMakePoint(20, NSMidY(self.bounds)), DesktopColor(0x91A1B7), 13);
         }
@@ -95,7 +217,8 @@ static void DrawText(NSString *text, NSPoint point, NSColor *color, CGFloat size
     }
 
     double minimum = INFINITY, maximum = -INFINITY;
-    for (DesktopCandle *candle in self.candles) {
+    for (NSUInteger i = visible.location; i < NSMaxRange(visible); i++) {
+        DesktopCandle *candle = self.candles[i];
         minimum = MIN(minimum, candle.low);
         maximum = MAX(maximum, candle.high);
     }
@@ -105,7 +228,7 @@ static void DrawText(NSString *text, NSPoint point, NSColor *color, CGFloat size
     CGFloat (^yForPrice)(double) = ^CGFloat(double price) {
         return NSMinY(plot) + (price - minimum) / (maximum - minimum) * NSHeight(plot);
     };
-    CGFloat step = NSWidth(plot) / self.candles.count;
+    CGFloat step = NSWidth(plot) / visible.length;
     NSColor *muted = DesktopColor(0x91A1B7);
     if (!self.miniature) {
         for (NSInteger i = 0; i <= 4; i++) {
@@ -119,8 +242,8 @@ static void DrawText(NSString *text, NSPoint point, NSColor *color, CGFloat size
     }
 
     CGFloat bodyWidth = MAX(1, MIN(self.miniature ? 3 : 8, step * 0.60));
-    for (NSUInteger i = 0; i < self.candles.count; i++) {
-        DesktopCandle *candle = self.candles[i];
+    for (NSUInteger i = 0; i < visible.length; i++) {
+        DesktopCandle *candle = self.candles[visible.location + i];
         CGFloat x = NSMinX(plot) + (i + 0.5) * step;
         CGFloat open = yForPrice(candle.open), close = yForPrice(candle.close);
         NSColor *color = DesktopColor(candle.close >= candle.open ? 0xFF7884 : 0x53CDB3);
@@ -135,19 +258,33 @@ static void DrawText(NSString *text, NSPoint point, NSColor *color, CGFloat size
     }
 
     NSDateFormatter *formatter = [NSDateFormatter new];
-    formatter.dateFormat = self.daily ? @"MM-dd" : @"MM-dd HH:mm";
-    DrawText([formatter stringFromDate:self.candles.firstObject.time], NSMakePoint(NSMinX(plot), 11), muted, 10);
-    DrawText([formatter stringFromDate:self.candles.lastObject.time], NSMakePoint(NSMaxX(plot) - 66, 11), muted, 10);
+    formatter.dateFormat = self.daily ? @"yy-MM-dd" : @"MM-dd HH:mm";
+    DrawText([formatter stringFromDate:self.candles[visible.location].time], NSMakePoint(NSMinX(plot), 11), muted, 10);
+    DrawText([formatter stringFromDate:self.candles[NSMaxRange(visible) - 1].time], NSMakePoint(NSMaxX(plot) - 68, 11), muted, 10);
 
-    if (_hovered >= 0 && _hovered < (NSInteger)self.candles.count) {
-        DesktopCandle *candle = self.candles[_hovered];
+    BOOL hovering = _hovered >= 0 && (NSUInteger)_hovered < visible.length;
+    NSUInteger index = hovering ? visible.location + (NSUInteger)_hovered : NSMaxRange(visible) - 1;
+    DesktopCandle *candle = self.candles[index];
+    if (hovering) {
         CGFloat x = NSMinX(plot) + (_hovered + 0.5) * step;
         [muted setStroke];
         [NSBezierPath strokeLineFromPoint:NSMakePoint(x, NSMinY(plot)) toPoint:NSMakePoint(x, NSMaxY(plot))];
-        int p = (int)self.precision;
-        NSString *summary = [NSString stringWithFormat:@"%@   开 %.*f   高 %.*f   低 %.*f   收 %.*f",
-                             [formatter stringFromDate:candle.time], p, candle.open, p, candle.high, p, candle.low, p, candle.close];
-        DrawText(summary, NSMakePoint(NSMinX(plot), NSMaxY(plot) + 12), DesktopColor(0xDCE6F5), 11);
     }
+    int p = (int)self.precision;
+    NSString *summary = [NSString stringWithFormat:@"%@   开 %.*f   高 %.*f   低 %.*f   收 %.*f",
+                         [formatter stringFromDate:candle.time], p, candle.open, p, candle.high, p, candle.low, p, candle.close];
+    double previousClose = index > 0 ? self.candles[index - 1].close : NAN;
+    NSString *change = @"涨跌 —";
+    NSColor *changeColor = muted;
+    if (isfinite(previousClose) && previousClose > 0) {
+        double amount = candle.close - previousClose;
+        change = [NSString stringWithFormat:@"涨跌 %+.*f（%+.2f%%）  ·  较前一根收盘", p, amount, amount / previousClose * 100];
+        if (amount) {
+            changeColor = DesktopColor(amount > 0 ? 0xFF808A : 0x59D7B9);
+        }
+    }
+    DrawText(summary, NSMakePoint(NSMinX(plot), NSMaxY(plot) + 28), DesktopColor(0xDCE6F5), 11);
+    DrawText(change, NSMakePoint(NSMinX(plot), NSMaxY(plot) + 10), changeColor, 11);
+    [self setAccessibilityValue:[NSString stringWithFormat:@"%@，%@", summary, change]];
 }
 @end
